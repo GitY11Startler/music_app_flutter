@@ -1,0 +1,28 @@
+name: my_music_player
+description: "A new Flutter project."
+
+publish_to: 'none' 
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.7.2
+
+dependencies:
+  flutter:
+    sdk: flutter
+  audioplayers: ^6.4.0 # Check for the latest version on pub.dev
+  file_picker: ^6.1.1  # Check for the latest version
+  permission_handler: ^11.0.1 # For storage permissions
+  path_provider: ^2.1.1 # To get common file system locations
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^2.0.0
+
+# The following section is specific to Flutter packages.
+flutter:
+
+  uses-material-design: true
+  assets:
+    - assets/

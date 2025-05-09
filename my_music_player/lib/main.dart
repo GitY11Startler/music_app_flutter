@@ -2,6 +2,8 @@ import 'dart:typed_data'; // Required for Uint8List
 import 'package:flutter/material.dart';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show kIsWeb; // For kIsWeb constant
+import 'dart:html' as html; // For Blob, Url.createObjectUrlFromBlob, Url.revokeObjectUrl
 // import 'package:permission_handler/permission_handler.dart'; // Less critical for web
 // import 'package:path/path.dart' as p; // path package less needed for PlatformFile.name
 
@@ -50,10 +52,13 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
   List<PlatformFile> _songs = []; // Changed from List<File>
   int _currentSongIndex = -1;
   String _currentSongTitle = "No song selected";
+  double _currentVolume = 1.0;
+  String? _currentObjectUrl; // To store the current blob URL for web playback
 
   @override
   void initState() {
     super.initState();
+    _audioPlayer.setVolume(_currentVolume);
     // _requestPermission(); // Permission handling is different on web
 
     _audioPlayer.onPlayerStateChanged.listen((state) {
@@ -100,20 +105,42 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
     FilePickerResult? result = await FilePicker.platform.pickFiles(
       type: FileType.audio,
       allowMultiple: true,
-      withData: true, // IMPORTANT for web: ensures bytes are loaded
+      withData: true,
     );
 
     if (result != null && result.files.isNotEmpty) {
-      setState(() {
-        _songs = result.files; // Store PlatformFile objects
-        if (_songs.isNotEmpty) {
-          _currentSongIndex = 0;
-          _playSong(_currentSongIndex);
-        } else {
-          _currentSongIndex = -1;
-          _currentSongTitle = "No songs found";
-        }
-      });
+      print("Files picked to add: ${result.files.length}");
+      
+      final bool wasListEmpty = _songs.isEmpty; // Check if the list was empty before adding
+
+      // Filter out files that might not have loaded bytes correctly (though withData should ensure it)
+      final newSongs = result.files.where((file) => file.bytes != null).toList();
+
+      if (newSongs.isNotEmpty) {
+        _songs.addAll(newSongs); // ADD to the existing list
+
+        setState(() {
+          if (wasListEmpty) { // If the list was empty, play the first of the newly added songs
+            _currentSongIndex = 0; // This will be the first of the new batch
+            _playSong(_currentSongIndex);
+          } else if (_currentSongIndex == -1) {
+            // List was not empty, but nothing was selected/playing.
+            // You could choose to auto-select the first of the new songs or just let the user tap.
+            // For now, let's just ensure the UI can update if needed.
+            // If you want to select the first new one:
+            // _currentSongIndex = _songs.length - newSongs.length; // Index of the first new song
+            // _currentSongTitle = _songs[_currentSongIndex].name;
+          }
+          // If a song was already playing, it continues to play.
+        });
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('${newSongs.length} song(s) added to library.')),
+        );
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('No valid audio files found in selection.')),
+        );
+      }
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('No files selected or an error occurred.')),
@@ -209,22 +236,94 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
     ].join(':');
   }
 
+  Future<void> _seekRelative(int seconds) async {
+    if (_currentSongIndex == -1 || _duration == Duration.zero) return; // No song or duration yet
+
+    final currentPosition = _position;
+    Duration newPosition = currentPosition + Duration(seconds: seconds);
+
+    // Clamp the new position to be within the song's duration (0 to _duration)
+    if (newPosition < Duration.zero) {
+      newPosition = Duration.zero;
+    }
+    if (newPosition > _duration) {
+      newPosition = _duration; // Don't seek beyond the end
+    }
+
+    await _audioPlayer.seek(newPosition);
+    // Optional: If you want the song to resume if it was paused when seeking
+    // if (!_isPlaying && _songs.isNotEmpty) {
+    //   _resumeSong();
+    // }
+  }
+
+  Future<void> _removeSong(int indexToRemove) async {
+    if (indexToRemove < 0 || indexToRemove >= _songs.length) return; // Invalid index
+
+    final removedSongName = _songs[indexToRemove].name;
+    print("Attempting to remove song: $removedSongName at index $indexToRemove");
+
+    bool isCurrentlyPlayingSongRemoved = (_currentSongIndex == indexToRemove);
+
+    // 1. If the song being removed is the one currently playing:
+    if (isCurrentlyPlayingSongRemoved) {
+      await _audioPlayer.stop();
+      _isPlaying = false;
+      _duration = Duration.zero;
+      _position = Duration.zero;
+      if (kIsWeb && _currentObjectUrl != null) {
+        html.Url.revokeObjectUrl(_currentObjectUrl!);
+        _currentObjectUrl = null;
+        print("Revoked _currentObjectUrl for removed playing song: $removedSongName");
+      }
+    }
+
+    // 2. Remove the song from the list
+    _songs.removeAt(indexToRemove);
+    print("Song $removedSongName removed. New song count: ${_songs.length}");
+
+    // 3. Adjust _currentSongIndex and player state
+    if (_songs.isEmpty) {
+      _currentSongIndex = -1;
+      _currentSongTitle = "No song selected";
+      // isPlaying, duration, position already handled if current was removed
+    } else if (isCurrentlyPlayingSongRemoved) {
+      // The currently playing song was removed, and the list is not empty.
+      // Let's select the next song (or the first if the last one was removed), but don't auto-play.
+      // User will need to tap to play.
+      _currentSongIndex = indexToRemove % _songs.length; // Stays at same index or wraps to 0
+      // Or simply set to -1 to force user selection:
+      // _currentSongIndex = -1;
+      // _currentSongTitle = "Select a song";
+      // For now, let's try to keep a selection if possible
+      if (_currentSongIndex >= _songs.length) _currentSongIndex = 0; // Ensure valid index
+      _currentSongTitle = _songs[_currentSongIndex].name;
+
+    } else if (_currentSongIndex > indexToRemove) {
+      // A song *before* the currently playing one was removed.
+      _currentSongIndex--;
+    }
+    // If a song *after* the current one was removed, _currentSongIndex is still correct.
+
+    setState(() {}); // Update the UI
+  }
+
   @override
   void dispose() {
     _audioPlayer.dispose();
     super.dispose();
   }
 
- @override
+@override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Flutter Web Music Player'),
+        title: const Text('Flutter Web Music Player by YZ & MM'), // Your custom title
         actions: [
           IconButton(
-            icon: const Icon(Icons.folder_open),
+            icon: const Icon(Icons.playlist_add),
             onPressed: _pickSongs,
-            tooltip: 'Load Songs',
+            tooltip: 'Add Songs to Library',
           ),
         ],
       ),
@@ -233,43 +332,41 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            // Album Art Placeholder
             Container(
               height: 200,
               width: 200,
               decoration: BoxDecoration(
                 color: Colors.grey[800],
                 borderRadius: BorderRadius.circular(12),
-                // Album art from bytes is more complex for web, placeholder for now
-                // image: _currentSongIndex != -1 && _songs[_currentSongIndex].bytes != null
-                //     ? DecorationImage(
-                //         image: MemoryImage(_songs[_currentSongIndex].bytes!), // This won't work as these are audio bytes
-                //         fit: BoxFit.cover,
-                //       )
-                //     : null,
-                 image: DecorationImage( // Keep placeholder
-                        image: const AssetImage('assets/default_album_art.png'),
-                        fit: BoxFit.cover,
-                        colorFilter: ColorFilter.mode(Colors.black.withOpacity(0.3), BlendMode.dstATop)
-                      ),
+                image: DecorationImage(
+                  image: const AssetImage('assets/default_album_art.png'),
+                  fit: BoxFit.cover,
+                  colorFilter: ColorFilter.mode(Colors.black.withOpacity(0.3), BlendMode.dstATop),
+                ),
               ),
               child: _currentSongIndex == -1 ? Icon(Icons.music_note, size: 100, color: Colors.grey[600]) : null,
             ),
             const SizedBox(height: 24),
 
+            // Song Title
             Text(
               _currentSongTitle,
               style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: Colors.white),
               textAlign: TextAlign.center,
-              maxLines: 2, // Allow for longer filenames
+              maxLines: 2,
               overflow: TextOverflow.ellipsis,
             ),
             const SizedBox(height: 8),
-             Text(
+
+            // Artist/Status Text
+            Text(
               _currentSongIndex != -1 ? "Playing from local file" : "Select a song",
               style: Theme.of(context).textTheme.titleMedium?.copyWith(color: Colors.white70),
             ),
             const SizedBox(height: 24),
 
+            // Progress Slider
             SliderTheme(
               data: SliderTheme.of(context).copyWith(
                 activeTrackColor: Colors.tealAccent,
@@ -281,11 +378,13 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
               ),
               child: Slider(
                 min: 0,
-                max: _duration.inSeconds.toDouble() + 1.0,
+                max: _duration.inSeconds.toDouble() + 1.0, // +1 to prevent jump at end
                 value: _position.inSeconds.toDouble().clamp(0.0, _duration.inSeconds.toDouble()),
                 onChanged: (value) async {
-                  final position = Duration(seconds: value.toInt());
-                  await _audioPlayer.seek(position);
+                  if (_duration > Duration.zero) { // Only seek if duration is loaded
+                    final position = Duration(seconds: value.toInt());
+                    await _audioPlayer.seek(position);
+                  }
                 },
               ),
             ),
@@ -301,14 +400,21 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
             ),
             const SizedBox(height: 20),
 
+            // Playback Controls with Seek Buttons
             Row(
-              mainAxisAlignment: MainAxisAlignment.center,
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
               children: [
+                IconButton(
+                  icon: const Icon(Icons.replay_10, size: 30),
+                  onPressed: _songs.isNotEmpty && _duration > Duration.zero ? () => _seekRelative(-10) : null,
+                  color: Colors.white,
+                  tooltip: 'Rewind 10s',
+                ),
                 IconButton(
                   icon: const Icon(Icons.skip_previous, size: 36),
                   onPressed: _songs.isNotEmpty ? _playPrevious : null,
+                  color: Colors.white,
                 ),
-                const SizedBox(width: 20),
                 IconButton(
                   icon: Icon(
                     _isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
@@ -319,14 +425,55 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                       : null,
                   color: Colors.tealAccent,
                 ),
-                const SizedBox(width: 20),
                 IconButton(
                   icon: const Icon(Icons.skip_next, size: 36),
                   onPressed: _songs.isNotEmpty ? _playNext : null,
+                  color: Colors.white,
+                ),
+                IconButton(
+                  icon: const Icon(Icons.forward_10, size: 30),
+                  onPressed: _songs.isNotEmpty && _duration > Duration.zero ? () => _seekRelative(10) : null,
+                  color: Colors.white,
+                  tooltip: 'Forward 10s',
                 ),
               ],
             ),
+            const SizedBox(height: 20), // Adjusted spacing
+
+            // Volume Slider
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.volume_down, color: _currentVolume > 0.05 ? Colors.white : Colors.white30),
+                Expanded(
+                  child: SliderTheme(
+                    data: SliderTheme.of(context).copyWith(
+                      activeTrackColor: Colors.white70,
+                      inactiveTrackColor: Colors.white30,
+                      thumbColor: Colors.white,
+                      overlayColor: Colors.white.withAlpha(0x29),
+                      thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 8.0),
+                      overlayShape: const RoundSliderOverlayShape(overlayRadius: 16.0),
+                    ),
+                    child: Slider(
+                      min: 0.0,
+                      max: 1.0,
+                      value: _currentVolume,
+                      onChanged: (value) {
+                        setState(() {
+                          _currentVolume = value;
+                        });
+                        _audioPlayer.setVolume(_currentVolume);
+                      },
+                    ),
+                  ),
+                ),
+                Icon(Icons.volume_up, color: _currentVolume < 0.95 ? Colors.white : Colors.white30),
+              ],
+            ),
             const SizedBox(height: 30),
+
+            // Song List
             Expanded(
               child: _songs.isEmpty
                   ? Center(
@@ -344,7 +491,7 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                       itemCount: _songs.length,
                       itemBuilder: (context, index) {
                         final songFile = _songs[index];
-                        final title = songFile.name; // Use PlatformFile.name
+                        final title = songFile.name;
                         return Card(
                           color: _currentSongIndex == index
                               ? Colors.teal.withOpacity(0.5)
@@ -353,19 +500,39 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                             leading: Icon(Icons.music_note, color: _currentSongIndex == index ? Colors.tealAccent : Colors.white),
                             title: Text(
                               title,
-                               style: TextStyle(
+                              style: TextStyle(
                                 color: _currentSongIndex == index ? Colors.white : Colors.white70,
-                                fontWeight: _currentSongIndex == index ? FontWeight.bold : FontWeight.normal
+                                fontWeight: _currentSongIndex == index ? FontWeight.bold : FontWeight.normal,
                               ),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
                             ),
                             onTap: () {
-                              _playSong(index);
+                              if (_currentSongIndex == index && _isPlaying) {
+                                _pauseSong(); // If tapping current playing song, pause it
+                              } else {
+                                _playSong(index); // Else, play the tapped song
+                              }
                             },
-                             trailing: _currentSongIndex == index && _isPlaying
-                                ? const Icon(Icons.bar_chart_rounded, color: Colors.tealAccent)
-                                : null,
+                            // --- MODIFIED TRAILING SECTION TO INCLUDE REMOVE BUTTON ---
+                            trailing: Row(
+                              mainAxisSize: MainAxisSize.min, // Crucial for Row in ListTile trailing
+                              children: [
+                                if (_currentSongIndex == index && _isPlaying)
+                                  const Padding(
+                                    padding: EdgeInsets.only(right: 8.0), // Space between icons
+                                    child: Icon(Icons.bar_chart_rounded, color: Colors.tealAccent),
+                                  ),
+                                IconButton(
+                                  icon: Icon(Icons.delete_outline, color: Colors.redAccent[100]),
+                                  tooltip: 'Remove from library',
+                                  onPressed: () {
+                                    _removeSong(index); // Call the remove song method
+                                  },
+                                ),
+                              ],
+                            ),
+                            // --- END OF MODIFIED TRAILING SECTION ---
                           ),
                         );
                       },

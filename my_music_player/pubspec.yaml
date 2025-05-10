@@ -10,8 +10,11 @@ environment:
 dependencies:
   flutter:
     sdk: flutter
-  audioplayers: ^6.4.0 # Check for the latest version on pub.dev
-  file_picker: ^6.1.1  # Check for the latest version
+
+  firebase_core: ^3.13.0 
+  firebase_auth: ^5.5.3 
+  audioplayers: ^6.4.0 
+  file_picker: ^6.1.1  
   permission_handler: ^11.0.1 # For storage permissions
   path_provider: ^2.1.1 # To get common file system locations
 

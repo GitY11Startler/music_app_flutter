@@ -1,5 +1,10 @@
 import 'dart:typed_data'; // Required for Uint8List
 import 'package:flutter/material.dart';
+import 'package:firebase_core/firebase_core.dart'; // Import Firebase Core
+import 'firebase_options.dart'; // Import the generated options file
+
+import 'package:firebase_auth/firebase_auth.dart'; // Import FirebaseAuth
+
 import 'package:audioplayers/audioplayers.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb; // For kIsWeb constant
@@ -11,7 +16,37 @@ import 'dart:html' as html; // For Blob, Url.createObjectUrlFromBlob, Url.revoke
 // For simplicity, I'll comment out platform-specific permission parts
 // but in a real cross-platform app, you'd use conditional imports/logic.
 
-void main() {
+String? getCurrentUserId() {
+  final User? user = FirebaseAuth.instance.currentUser;
+  return user?.uid;
+}
+
+Future<User?> signInAnonymouslyIfNeeded() async {
+  FirebaseAuth auth = FirebaseAuth.instance;
+  if (auth.currentUser == null) {
+    try {
+      UserCredential userCredential = await auth.signInAnonymously();
+      print("Signed in anonymously: ${userCredential.user?.uid}");
+      return userCredential.user;
+    } catch (e) {
+      print("Error signing in anonymously: $e");
+      return null;
+    }
+  } else {
+    print("User already signed in: ${auth.currentUser?.uid}");
+    return auth.currentUser;
+  }
+}
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp(
+    options: DefaultFirebaseOptions.currentPlatform, // Uses the generated firebase_options.dart
+  );
+
+  // Attempt anonymous sign-in
+  await signInAnonymouslyIfNeeded(); // You might want to store the User object
+
   runApp(const MyApp());
 }
 
@@ -414,6 +449,7 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                   icon: const Icon(Icons.skip_previous, size: 36),
                   onPressed: _songs.isNotEmpty ? _playPrevious : null,
                   color: Colors.white,
+                  tooltip: 'Play previous',
                 ),
                 IconButton(
                   icon: Icon(
@@ -424,11 +460,13 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                       ? (_isPlaying ? _pauseSong : _resumeSong)
                       : null,
                   color: Colors.tealAccent,
+                  tooltip: 'Pause/Resume',
                 ),
                 IconButton(
                   icon: const Icon(Icons.skip_next, size: 36),
                   onPressed: _songs.isNotEmpty ? _playNext : null,
                   color: Colors.white,
+                  tooltip: 'Play next',
                 ),
                 IconButton(
                   icon: const Icon(Icons.forward_10, size: 30),

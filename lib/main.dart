@@ -5,41 +5,66 @@ import 'firebase_options.dart'; // Import the generated options file
 
 import 'package:firebase_auth/firebase_auth.dart'; // Import FirebaseAuth
 
-import 'package:audioplayers/audioplayers.dart';
-import 'package:file_picker/file_picker.dart';
-
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+import 'package:audioplayers/audioplayers.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb; // For kIsWeb constant
-import 'dart:html' as html; 
+// import 'package:permission_handler/permission_handler.dart'; // Less critical for web
+// import 'package:path/path.dart' as p; // path package less needed for PlatformFile.name
 
-// Import your new auth files
-import 'auth_service.dart'; 
-import 'auth_screen.dart';
+// For web, we might not need path_provider or explicit permission_handler
+// For simplicity, I'll comment out platform-specific permission parts
+// but in a real cross-platform app, you'd use conditional imports/logic.
 
+import 'authScreen.dart'; // Import the AuthScreen
 
 String? getCurrentUserId() {
   final User? user = FirebaseAuth.instance.currentUser;
   return user?.uid;
 }
 
-// anonymous sign-in
-Future<User?> signInAnonymouslyIfNeeded() async {
-  FirebaseAuth auth = FirebaseAuth.instance;
-  if (auth.currentUser == null) {
-    try {
-      UserCredential userCredential = await auth.signInAnonymously();
-      print("Signed in anonymously: ${userCredential.user?.uid}");
-      return userCredential.user;
-    } catch (e) {
-      print("Error signing in anonymously: $e");
-      return null;
+Future<List<PlatformFile>> fetchSongsFromCloud() async {
+  print("Fetching songs from Firestore...");
+  final user = FirebaseAuth.instance.currentUser;
+  if (user == null) {
+    print('No user signed in.');
+    return [];
+  }
+
+  final uid = user.uid;
+  final firestoreRef = FirebaseFirestore.instance.collection('users').doc(uid).collection('songs');
+
+  try {
+    final querySnapshot = await firestoreRef.get();
+    final List<PlatformFile> fetchedSongs = [];
+
+    for (final doc in querySnapshot.docs) {
+      final data = doc.data();
+      final name = data['name'] as String;
+      final url = data['url'] as String;
+
+      // Download the song bytes
+      final songBytes = await FirebaseStorage.instance.refFromURL(url).getData();
+
+      if (songBytes != null) {
+        fetchedSongs.add(PlatformFile(
+          name: name,
+          bytes: songBytes,
+          size: songBytes.length,
+        ));
+      }
     }
-  } else {
-    print("User already signed in: ${auth.currentUser?.uid}");
-    return auth.currentUser;
+
+    print('Fetched ${fetchedSongs.length} songs from the cloud.');
+    return fetchedSongs;
+  } catch (e) {
+    print('Error fetching songs: $e');
+    return [];
   }
 }
+
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -47,8 +72,6 @@ void main() async {
     options: DefaultFirebaseOptions.currentPlatform, // Uses the generated firebase_options.dart
   );
 
-  // Attempt anonymous sign-in
-  // await signInAnonymouslyIfNeeded(); // You might want to store the User object
 
   runApp(const MyApp());
 }
@@ -59,7 +82,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'Flutter Web Music Player by YZ & MM',
+      title: 'Flutter Web Music Player',
       theme: ThemeData.dark().copyWith(
         primaryColor: Colors.teal,
         hintColor: Colors.tealAccent,
@@ -70,64 +93,24 @@ class MyApp extends StatelessWidget {
         ),
         iconTheme: const IconThemeData(color: Colors.white),
       ),
-      home: const AuthenticationWrapper(),
+      home: const MusicPlayerScreen(),
     );
   }
 }
-
-class AuthenticationWrapper extends StatelessWidget {
-  const AuthenticationWrapper({super.key});
-  // No need to instantiate AuthService here if AuthScreen handles its own instance
-  // OR you can pass one down if you prefer a single instance via Provider/GetIt later.
-  // For now, AuthScreen creating its own is fine.
-
-  @override
-  Widget build(BuildContext context) {
-    // Using AuthService directly here, or you can create an instance once
-    final AuthService authService = AuthService();
-
-    return StreamBuilder<User?>(
-      stream: authService.authStateChanges, // Listen to auth state changes
-      builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
-          ); // Show loading indicator while checking auth state
-        }
-
-        if (snapshot.hasData && snapshot.data != null) {
-          // User IS signed in
-          print("User is signed in (AuthWrapper): ${snapshot.data!.uid} - Email: ${snapshot.data!.email}");
-          // Navigate to your main app screen, passing the user object
-          return MusicPlayerScreen(user: snapshot.data!);
-        } else {
-          // User is NOT signed in
-          print("User is not signed in (AuthWrapper). Showing AuthScreen.");
-          // Show your AuthScreen for login/registration
-          return const AuthScreen(); // AuthScreen will handle its own AuthService instance
-        }
-      },
-    );
-  }
-}
-
-
-// --- Ensure your MusicPlayerScreen is defined or imported ---
-// (And make sure it accepts a User object as a parameter)
-
 
 class MusicPlayerScreen extends StatefulWidget {
-  final User user; // User is now required as AuthWrapper ensures it's not null here
-
-  const MusicPlayerScreen({super.key, required this.user});
+  const MusicPlayerScreen({super.key});
 
   @override
   State<MusicPlayerScreen> createState() => _MusicPlayerScreenState();
 }
 
 class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
-  String? _currentUserId;
+  static _MusicPlayerScreenState? instance;
+
+
   final AudioPlayer _audioPlayer = AudioPlayer();
+  bool _isLoading = false;
   bool _isPlaying = false;
   Duration _duration = Duration.zero;
   Duration _position = Duration.zero;
@@ -135,14 +118,11 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
   int _currentSongIndex = -1;
   String _currentSongTitle = "No song selected";
   double _currentVolume = 1.0;
-  String? _currentObjectUrl; // To store the current blob URL for web playback
 
   @override
   void initState() {
     super.initState();
-    _currentUserId = widget.user.uid; // Access the logged-in user's ID
-    print("MusicPlayerScreen initialized for user: $_currentUserId");  
-
+    instance = this; // Set the static instance to this state
     _audioPlayer.setVolume(_currentVolume);
     // _requestPermission(); // Permission handling is different on web
 
@@ -177,80 +157,95 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
     });
   }
 
-  Future<void> saveLastPlayerState({
-    bool isSigningOut = false, // Optional flag to know if it's part of sign-out
-  }) async {
-    // Get the current user's ID. Ensure _currentUserId is populated (e.g., from widget.user.uid in initState).
-    final String? userId = _currentUserId; // Or widget.user?.uid directly if you prefer
-    
-    if (userId == null) {
-      print("SaveState: No user logged in, cannot save state.");
-      return;
-    }
+  @override
+  void dispose() {
+    instance = null; // Clear the instance
+    _audioPlayer.dispose();
+    super.dispose();
+  }
 
-    Map<String, dynamic> playerStateData = {};
+  Future<User?> signInAnonymouslyIfNeeded() async {
+    FirebaseAuth auth = FirebaseAuth.instance;
+    if (auth.currentUser == null) {
+      try {
+        _showLoadingDialog("Signing in and fetching your songs...");
+        UserCredential userCredential = await auth.signInAnonymously();
+        print("Signed in anonymously: ${userCredential.user?.uid}");
 
-    // 1. Gather the data you want to save:
-    if (_songs.isNotEmpty && _currentSongIndex != -1 && _currentSongIndex < _songs.length) {
-      // Ensure _currentSongIndex is valid before accessing _songs
-      playerStateData['lastPlayedSongTitle'] = _songs[_currentSongIndex].name; // Or a more robust unique ID if you have one
-      // For local files, saving the name is a common approach.
-      // If these were cloud songs, you'd save their Firestore ID or Cloud Storage URL.
-      
-      playerStateData['lastPlayedSongPosition'] = _position.inSeconds;
+        // Fetch songs from the cloud after signing in
+        final fetchedSongs = await fetchSongsFromCloud();
+        if (fetchedSongs.isNotEmpty) {
+          updateSongs(fetchedSongs);
+        }
 
-      // You might want to save the "context" of the song, e.g., if it was part of a specific playlist
-      // For now, let's assume it's just the general "last played" from the current queue.
-      // playerStateData['lastPlayedPlaylistName'] = "Current Queue"; // Or actual playlist name
-    } else if (isSigningOut) {
-      // If signing out and no song was active, you might want to clear these fields in Firestore
-      // or explicitly set them to null to indicate no last played song.
-      playerStateData['lastPlayedSongTitle'] = FieldValue.delete(); // Or null
-      playerStateData['lastPlayedSongPosition'] = FieldValue.delete(); // Or null
-    }
-    
-    playerStateData['lastVolume'] = _currentVolume;
-    // playerStateData['timestamp'] = FieldValue.serverTimestamp(); // Optional: when was state last saved
-
-    if (playerStateData.isEmpty && !isSigningOut) {
-      print("SaveState: No relevant player state to save.");
-      return; // Nothing to save unless we are signing out and want to clear fields
-    }
-    if (playerStateData.isEmpty && isSigningOut) {
-      // If signing out and no specific state was captured to clear, maybe do nothing
-      // or ensure specific fields are cleared if that's the desired behavior.
-      // For now, if it's empty and we are signing out, let's proceed if we *intended* to clear.
-      // Example: if _songs was empty, the above `if` block wouldn't run.
-      // So, to ensure fields are cleared on sign out if no song was playing:
-      if (isSigningOut && !playerStateData.containsKey('lastPlayedSongTitle')) {
-          playerStateData['lastPlayedSongTitle'] = FieldValue.delete();
-          playerStateData['lastPlayedSongPosition'] = FieldValue.delete();
+        _hideLoadingDialog();
+        return userCredential.user;
+      } catch (e) {
+        _hideLoadingDialog();
+        print("Error signing in anonymously: $e");
+        return null;
       }
-    }
+    } else {
+      print("User already signed in: ${auth.currentUser?.uid}");
 
+      // Fetch songs from the cloud if already signed in
+      _showLoadingDialog("Fetching your songs...");
+      final fetchedSongs = await fetchSongsFromCloud();
+      if (fetchedSongs.isNotEmpty) {
+        updateSongs(fetchedSongs);
+      }
+      _hideLoadingDialog();
 
-    // 2. Save to Firestore
-    try {
-      print("SaveState: Attempting to save for user $userId: $playerStateData");
-      await FirebaseFirestore.instance
-          .collection('users') // Your top-level collection for user-specific data
-          .doc(userId)         // Document ID is the user's UID
-          .set(playerStateData, SetOptions(merge: true)); // Use set with merge:true
-                                                        // This creates the document if it doesn't exist,
-                                                        // or updates specific fields if it does.
-                                                        // FieldValue.delete() will remove a field.
-      print("SaveState: Player state saved successfully for user $userId.");
-    } catch (e) {
-      print("SaveState: Error saving player state for user $userId: $e");
+      return auth.currentUser;
     }
   }
 
-  Future<void> _handleSignOut() async {
-    final AuthService authService = AuthService(); // Or get from a provider
-    await authService.signOut();
-    // The AuthenticationWrapper's StreamBuilder will automatically
-    // detect the sign-out and navigate back to AuthScreen.
+    void _showLoadingDialog(String message) {
+    showDialog(
+      context: context,
+      barrierDismissible: false, // Prevent dismissing the dialog
+      builder: (BuildContext context) {
+        return AlertDialog(
+          backgroundColor: Colors.grey[900],
+          content: Row(
+            children: [
+              const CircularProgressIndicator(color: Colors.teal),
+              const SizedBox(width: 16),
+              Expanded(
+                child: Text(
+                  message,
+                  style: const TextStyle(color: Colors.white),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
   }
+
+  void _hideLoadingDialog() {
+    Navigator.of(context, rootNavigator: true).pop(); // Close the dialog
+  }
+
+    void updateSongs(List<PlatformFile> fetchedSongs) {
+    setState(() {
+      _songs = fetchedSongs;
+      if (_songs.isNotEmpty) {
+        _currentSongIndex = 0;
+        _currentSongTitle = _songs[0].name;
+      }
+    });
+  }
+
+  // Simplified permission for web context (browser handles it via picker)
+  // Future<void> _requestPermission() async {
+  //   if (kIsWeb) { // kIsWeb is from flutter/foundation.dart
+  //     print("Running on Web, file picker will handle permissions.");
+  //     return;
+  //   }
+  //   // ... (keep native permission logic if needed for mobile)
+  // }
 
   Future<void> _pickSongs() async {
     FilePickerResult? result = await FilePicker.platform.pickFiles(
@@ -270,23 +265,74 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
       if (newSongs.isNotEmpty) {
         _songs.addAll(newSongs); // ADD to the existing list
 
-        setState(() {
+        
+
+      // Check if the user is signed in and upload songs to the cloud
+      final user = FirebaseAuth.instance.currentUser;
+      if (user != null) {
+        _showLoadingDialog("Uploading songs to the cloud...");
+        try {
+          final uid = user.uid;
+          final storageRef = FirebaseStorage.instance.ref().child('songs/$uid');
+          final firestoreRef = FirebaseFirestore.instance.collection('users').doc(uid).collection('songs');
+
+          for (final file in newSongs) {
+            if (file.bytes != null) {
+              final fileName = file.name;
+              final fileRef = storageRef.child(fileName);
+
+              try {
+                print("Uploading started for $fileName");
+
+                // Start the upload task
+                final uploadTask = fileRef.putData(file.bytes!);
+
+                // Listen to the upload progress
+                uploadTask.snapshotEvents.listen((TaskSnapshot snapshot) {
+                  final progress = (snapshot.bytesTransferred / snapshot.totalBytes) * 100;
+                  print("Upload is $progress% complete for $fileName");
+                });
+
+                // Wait for the upload to complete
+                final snapshot = await uploadTask;
+                print("Upload completed for $fileName");
+                final downloadUrl = await fileRef.getDownloadURL();
+
+                // Save metadata to Firestore
+                await firestoreRef.doc(fileName).set({
+                  'name': fileName,
+                  'url': downloadUrl,
+                  'uploadedAt': FieldValue.serverTimestamp(),
+                });
+
+                print('Uploaded $fileName and saved metadata.');
+              } catch (e) {
+                print('Error uploading $fileName: $e');
+              }
+            }
+          }
+
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Songs uploaded to the cloud.')),
+          );
+        } finally {
+          _hideLoadingDialog();
+        }
+      } else {
+        print("User is not signed in. Songs will only be stored locally.");
+      }
+
+      setState(() {
           if (wasListEmpty) { // If the list was empty, play the first of the newly added songs
             _currentSongIndex = 0; // This will be the first of the new batch
             _playSong(_currentSongIndex);
-          } else if (_currentSongIndex == -1) {
-            // List was not empty, but nothing was selected/playing.
-            // You could choose to auto-select the first of the new songs or just let the user tap.
-            // For now, let's just ensure the UI can update if needed.
-            // If you want to select the first new one:
-            // _currentSongIndex = _songs.length - newSongs.length; // Index of the first new song
-            // _currentSongTitle = _songs[_currentSongIndex].name;
-          }
-          // If a song was already playing, it continues to play.
+          } 
         });
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('${newSongs.length} song(s) added to library.')),
         );
+
+
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(content: Text('No valid audio files found in selection.')),
@@ -299,56 +345,56 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
     }
   }
 
-    Future<void> _playSong(int index, {bool resume = false}) async {
-    if (index < 0 || index >= _songs.length) {
-      print("_playSong: Invalid index $index"); // DEBUG
-      return;
-    }
-
-    final song = _songs[index];
-    print("_playSong: Attempting to play '${song.name}' at index $index. Has bytes: ${song.bytes != null}"); // DEBUG
-
-    if (song.bytes == null) {
-      print("Error: Song bytes are null for '${song.name}'. Cannot play."); // DEBUG
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error: Could not load song data for ${song.name}')),
-      );
-      setState(() {
-         _currentSongTitle = "Error loading song";
-         _isPlaying = false;
-      });
-      return;
-    }
-
-    try {
-      if (!resume || _currentSongIndex != index) {
-        print("_playSong: Stopping player and setting new source."); // DEBUG
-        await _audioPlayer.stop();
-        await _audioPlayer.setSourceBytes(song.bytes as Uint8List); // Ensure song.bytes is not null here
-        print("_playSong: Source set for '${song.name}'"); // DEBUG
-      } else {
-        print("_playSong: Resuming current song '${song.name}'"); // DEBUG
-      }
-      await _audioPlayer.resume();
-      print("_playSong: Resumed/Played '${song.name}'"); // DEBUG
-      
-      setState(() {
-        _currentSongIndex = index;
-        _currentSongTitle = song.name;
-        _isPlaying = true;
-      });
-    } catch (e, s) { // <<<<<<< CORRECTED CATCH BLOCK HERE
-      print("Error playing song '${song.name}': $e"); 
-      print("Stack trace for '${song.name}':\n$s"); // <<<<<<< PRINTING THE STACK TRACE
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error playing song: ${song.name} - $e')), // Added error to snackbar
-      );
-       setState(() {
-        _isPlaying = false;
-        _currentSongTitle = "Error playing song";
-      });
-    }
+Future<void> _playSong(int index, {bool resume = false}) async {
+  if (index < 0 || index >= _songs.length) {
+    print("_playSong: Invalid index $index"); // DEBUG
+    return;
   }
+
+  final song = _songs[index];
+  print("_playSong: Attempting to play '${song.name}' at index $index. Has bytes: ${song.bytes != null}"); // DEBUG
+
+  if (song.bytes == null) {
+    print("Error: Song bytes are null for '${song.name}'. Cannot play."); // DEBUG
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Error: Could not load song data for ${song.name}')),
+    );
+    setState(() {
+      _currentSongTitle = "Error loading song";
+      _isPlaying = false;
+    });
+    return;
+  }
+
+  try {
+    if (!resume || _currentSongIndex != index) {
+      print("_playSong: Stopping player and setting new source."); // DEBUG
+      await _audioPlayer.stop();
+      await _audioPlayer.setSourceBytes(song.bytes as Uint8List); // Directly use the bytes
+      print("_playSong: Source set for '${song.name}'"); // DEBUG
+    } else {
+      print("_playSong: Resuming current song '${song.name}'"); // DEBUG
+    }
+    await _audioPlayer.resume();
+    print("_playSong: Resumed/Played '${song.name}'"); // DEBUG
+
+    setState(() {
+      _currentSongIndex = index;
+      _currentSongTitle = song.name;
+      _isPlaying = true;
+    });
+  } catch (e, s) {
+    print("Error playing song '${song.name}': $e");
+    print("Stack trace for '${song.name}':\n$s");
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text('Error playing song: ${song.name} - $e')),
+    );
+    setState(() {
+      _isPlaying = false;
+      _currentSongTitle = "Error playing song";
+    });
+  }
+}
 
   Future<void> _pauseSong() async {
     await _audioPlayer.pause();
@@ -409,86 +455,115 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
   }
 
   Future<void> _removeSong(int indexToRemove) async {
-    if (indexToRemove < 0 || indexToRemove >= _songs.length) return; // Invalid index
+  if (indexToRemove < 0 || indexToRemove >= _songs.length) return; // Invalid index
 
-    final removedSongName = _songs[indexToRemove].name;
-    print("Attempting to remove song: $removedSongName at index $indexToRemove");
+  final removedSongName = _songs[indexToRemove].name;
+  print("Attempting to remove song: $removedSongName at index $indexToRemove");
 
-    bool isCurrentlyPlayingSongRemoved = (_currentSongIndex == indexToRemove);
+  bool isCurrentlyPlayingSongRemoved = (_currentSongIndex == indexToRemove);
 
-    // 1. If the song being removed is the one currently playing:
-    if (isCurrentlyPlayingSongRemoved) {
-      await _audioPlayer.stop();
-      _isPlaying = false;
-      _duration = Duration.zero;
-      _position = Duration.zero;
-      if (kIsWeb && _currentObjectUrl != null) {
-        html.Url.revokeObjectUrl(_currentObjectUrl!);
-        _currentObjectUrl = null;
-        print("Revoked _currentObjectUrl for removed playing song: $removedSongName");
-      }
-    }
-
-    // 2. Remove the song from the list
-    _songs.removeAt(indexToRemove);
-    print("Song $removedSongName removed. New song count: ${_songs.length}");
-
-    // 3. Adjust _currentSongIndex and player state
-    if (_songs.isEmpty) {
-      _currentSongIndex = -1;
-      _currentSongTitle = "No song selected";
-      // isPlaying, duration, position already handled if current was removed
-    } else if (isCurrentlyPlayingSongRemoved) {
-      // The currently playing song was removed, and the list is not empty.
-      // Let's select the next song (or the first if the last one was removed), but don't auto-play.
-      // User will need to tap to play.
-      _currentSongIndex = indexToRemove % _songs.length; // Stays at me index or wraps to 0
-      // Or simply set to -1 to force user selection:
-      // _currentSongIndex = -1;
-      // _currentSongTitle = "Select a song";
-      // For now, let's try to keep a selection if possible
-      if (_currentSongIndex >= _songs.length) _currentSongIndex = 0; // Ensure valid index
-      _currentSongTitle = _songs[_currentSongIndex].name;
-
-    } else if (_currentSongIndex > indexToRemove) {
-      // A song *before* the currently playing one was removed.
-      _currentSongIndex--;
-    }
-    // If a song *after* the current one was removed, _currentSongIndex is still correct.
-
-    setState(() {}); // Update the UI
+  // 1. If the song being removed is the one currently playing:
+  if (isCurrentlyPlayingSongRemoved) {
+    await _audioPlayer.stop();
+    _isPlaying = false;
+    _duration = Duration.zero;
+    _position = Duration.zero;
+    print("Stopped playback for removed playing song: $removedSongName");
   }
 
-  @override
-  void dispose() {
-    _audioPlayer.dispose();
-    super.dispose();
+  // 2. Remove the song from the list
+  _songs.removeAt(indexToRemove);
+  print("Song $removedSongName removed. New song count: ${_songs.length}");
+
+  // 3. Adjust _currentSongIndex and player state
+  if (_songs.isEmpty) {
+    _currentSongIndex = -1;
+    _currentSongTitle = "No song selected";
+  } else if (isCurrentlyPlayingSongRemoved) {
+    _currentSongIndex = indexToRemove % _songs.length;
+    if (_currentSongIndex >= _songs.length) _currentSongIndex = 0;
+    _currentSongTitle = _songs[_currentSongIndex].name;
+  } else if (_currentSongIndex > indexToRemove) {
+    _currentSongIndex--;
   }
+
+  setState(() {}); // Update the UI
+}
+
 
 @override
   Widget build(BuildContext context) {
+
+    String? welcomeMessage;
+    final user = FirebaseAuth.instance.currentUser;
+    print("Current user: $user");
+
+    if (user != null) {
+      if (user.isAnonymous) {
+        welcomeMessage = "Welcome, Anonymous";
+      } else if (user.displayName != null && user.displayName!.isNotEmpty) {
+        welcomeMessage = "Welcome, ${user.displayName}";
+      } else if (user.email != null) {
+        welcomeMessage = "Welcome, ${user.email}";
+      }
+  } else {
+    welcomeMessage = null; // No message for guests
+  }
+
+
     return Scaffold(
       appBar: AppBar(
-        title: Text("Music for ${widget.user.email ?? 'User'}"),
+        title: const Text('Flutter Web Music Player by YZ & MM'), // Your custom title
         actions: [
-          IconButton(
-            icon: const Icon(Icons.logout),
-            onPressed: _handleSignOut,
-            tooltip: 'Sign Out',
-          ),
-          
           IconButton(
             icon: const Icon(Icons.playlist_add),
             onPressed: _pickSongs,
             tooltip: 'Add Songs to Library',
           ),
-        ],
-      ),
+          IconButton(
+            icon: Icon(
+              FirebaseAuth.instance.currentUser != null ? Icons.logout : Icons.login,
+            ),
+            onPressed: () async {
+              if (FirebaseAuth.instance.currentUser != null) {
+                // User is signed in, so sign out
+                await FirebaseAuth.instance.signOut();
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Signed out successfully.')),
+                );
+                setState(() {}); // Update the UI
+              } else {
+                // Navigate to the AuthScreen and wait for the result
+                final result = await Navigator.of(context).push(
+                  MaterialPageRoute(builder: (context) => const AuthScreen()),
+                );
+
+                // If the result is true, update the UI
+                if (result == true) {
+                  setState(() {}); // Trigger a rebuild to update the welcome message
+                }
+              }
+            },
+            tooltip: FirebaseAuth.instance.currentUser != null ? 'Sign Out' : 'Sign In',
+          ),
+          ],
+        ),
       body: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
+            // Welcome Message
+          if (welcomeMessage != null)
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                welcomeMessage,
+                style: Theme.of(context).textTheme.headlineSmall?.copyWith(color: Colors.white),
+              ),
+            ),
+          const SizedBox(height: 16), // Add spacing below the welcome message
+
             // Album Art Placeholder
             Container(
               height: 200,

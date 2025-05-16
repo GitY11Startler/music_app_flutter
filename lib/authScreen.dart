@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'cloud_utils.dart'; 
 
 class AuthScreen extends StatefulWidget {
   const AuthScreen({Key? key}) : super(key: key);
@@ -15,7 +16,7 @@ class _AuthScreenState extends State<AuthScreen> {
   bool _isLogin = true; // Toggle between login and sign-up
   bool _isLoading = false;
 
-  Future<void> _submitAuthForm() async {
+Future<void> _submitAuthForm() async {
   final email = _emailController.text.trim();
   final password = _passwordController.text.trim();
   final displayName = _displayNameController.text.trim();
@@ -57,8 +58,11 @@ class _AuthScreenState extends State<AuthScreen> {
       );
     }
 
-    // Pass a result back to the previous screen
-    Navigator.of(context).pop(true); // Indicate success
+    // Fetch songs from the cloud
+    final fetchedSongs = await fetchSongsFromStorage();
+
+    // Pass the fetched songs back to the previous screen
+    Navigator.of(context).pop(fetchedSongs); // Pass the songs list
   } on FirebaseAuthException catch (e) {
     String message = 'An error occurred, please try again.';
     if (e.code == 'email-already-in-use') {

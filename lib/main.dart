@@ -19,51 +19,13 @@ import 'package:flutter/foundation.dart' show kIsWeb; // For kIsWeb constant
 // but in a real cross-platform app, you'd use conditional imports/logic.
 
 import 'authScreen.dart'; // Import the AuthScreen
+import 'cloud_utils.dart'; 
 
 String? getCurrentUserId() {
   final User? user = FirebaseAuth.instance.currentUser;
   return user?.uid;
 }
 
-Future<List<PlatformFile>> fetchSongsFromCloud() async {
-  print("Fetching songs from Firestore...");
-  final user = FirebaseAuth.instance.currentUser;
-  if (user == null) {
-    print('No user signed in.');
-    return [];
-  }
-
-  final uid = user.uid;
-  final firestoreRef = FirebaseFirestore.instance.collection('users').doc(uid).collection('songs');
-
-  try {
-    final querySnapshot = await firestoreRef.get();
-    final List<PlatformFile> fetchedSongs = [];
-
-    for (final doc in querySnapshot.docs) {
-      final data = doc.data();
-      final name = data['name'] as String;
-      final url = data['url'] as String;
-
-      // Download the song bytes
-      final songBytes = await FirebaseStorage.instance.refFromURL(url).getData();
-
-      if (songBytes != null) {
-        fetchedSongs.add(PlatformFile(
-          name: name,
-          bytes: songBytes,
-          size: songBytes.length,
-        ));
-      }
-    }
-
-    print('Fetched ${fetchedSongs.length} songs from the cloud.');
-    return fetchedSongs;
-  } catch (e) {
-    print('Error fetching songs: $e');
-    return [];
-  }
-}
 
 
 void main() async {
@@ -118,44 +80,102 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
   int _currentSongIndex = -1;
   String _currentSongTitle = "No song selected";
   double _currentVolume = 1.0;
+  String? _welcomeMessage;
 
   @override
-  void initState() {
-    super.initState();
-    instance = this; // Set the static instance to this state
-    _audioPlayer.setVolume(_currentVolume);
-    // _requestPermission(); // Permission handling is different on web
+void initState() {
+  super.initState();
+  instance = this; // Set the static instance to this state
+  _audioPlayer.setVolume(_currentVolume);
 
-    _audioPlayer.onPlayerStateChanged.listen((state) {
-      if (mounted) {
-        setState(() {
-          _isPlaying = state == PlayerState.playing;
-        });
-      }
-    });
+  // Listen to Firebase Auth state changes
+  FirebaseAuth.instance.authStateChanges().listen((user) {
+    if (user != null) {
+      // User signed in
+      print("User signed in: ${user.uid}");
+      setState(() {
+        _updateWelcomeMessage(user);
+      });
 
-    _audioPlayer.onDurationChanged.listen((newDuration) {
-      if (mounted) {
-        setState(() {
-          _duration = newDuration;
-        });
-      }
-    });
+      // Fetch songs from the cloud
+      _fetchCloudSongs();
+    } else {
+      // User signed out
+      print("User signed out");
+      setState(() {
+        _welcomeMessage = null;
+        _songs.clear(); // Clear songs when signed out
+        _currentSongIndex = -1;
+        _currentSongTitle = "No song selected";
+      });
+    }
+  });
 
-    _audioPlayer.onPositionChanged.listen((newPosition) {
-      if (mounted) {
-        setState(() {
-          _position = newPosition;
-        });
-      }
-    });
+  // Listen to audio player events
+  _audioPlayer.onPlayerStateChanged.listen((state) {
+    if (mounted) {
+      setState(() {
+        _isPlaying = state == PlayerState.playing;
+      });
+    }
+  });
 
-    _audioPlayer.onPlayerComplete.listen((event) {
-      if (mounted) {
-        _playNext();
-      }
-    });
+  _audioPlayer.onDurationChanged.listen((newDuration) {
+    if (mounted) {
+      setState(() {
+        _duration = newDuration;
+      });
+    }
+  });
+
+  _audioPlayer.onPositionChanged.listen((newPosition) {
+    if (mounted) {
+      setState(() {
+        _position = newPosition;
+      });
+    }
+  });
+
+  _audioPlayer.onPlayerComplete.listen((event) {
+    if (mounted) {
+      _playNext();
+    }
+  });
+}
+
+void _updateWelcomeMessage(User user) {
+  if (user.isAnonymous) {
+    _welcomeMessage = "Welcome, Anonymous";
+  } else if (user.displayName != null && user.displayName!.isNotEmpty) {
+    _welcomeMessage = "Welcome, ${user.displayName}";
+  } else if (user.email != null) {
+    _welcomeMessage = "Welcome, ${user.email}";
+  } else {
+    _welcomeMessage = "Welcome!";
   }
+}
+
+Future<void> _fetchCloudSongs() async {
+  final user = FirebaseAuth.instance.currentUser;
+  if (user == null) return;
+
+  _showLoadingDialog("Fetching your songs from the cloud...");
+  try {
+    final fetchedSongs = await fetchSongsFromStorage(); // Use the new function
+    if (fetchedSongs.isNotEmpty) {
+      setState(() {
+        updateSongs(fetchedSongs);
+      });
+    }
+  } catch (e) {
+    print("Error fetching songs from Firebase Storage: $e");
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Failed to fetch songs from the cloud.')),
+    );
+  } finally {
+    _hideLoadingDialog();
+  }
+}
 
   @override
   void dispose() {
@@ -173,7 +193,7 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
         print("Signed in anonymously: ${userCredential.user?.uid}");
 
         // Fetch songs from the cloud after signing in
-        final fetchedSongs = await fetchSongsFromCloud();
+        final fetchedSongs = await fetchSongsFromStorage();
         if (fetchedSongs.isNotEmpty) {
           updateSongs(fetchedSongs);
         }
@@ -190,7 +210,7 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
 
       // Fetch songs from the cloud if already signed in
       _showLoadingDialog("Fetching your songs...");
-      final fetchedSongs = await fetchSongsFromCloud();
+      final fetchedSongs = await fetchSongsFromStorage();
       if (fetchedSongs.isNotEmpty) {
         updateSongs(fetchedSongs);
       }
@@ -294,18 +314,8 @@ class _MusicPlayerScreenState extends State<MusicPlayerScreen> {
                 });
 
                 // Wait for the upload to complete
-                final snapshot = await uploadTask;
+                await uploadTask;
                 print("Upload completed for $fileName");
-                final downloadUrl = await fileRef.getDownloadURL();
-
-                // Save metadata to Firestore
-                await firestoreRef.doc(fileName).set({
-                  'name': fileName,
-                  'url': downloadUrl,
-                  'uploadedAt': FieldValue.serverTimestamp(),
-                });
-
-                print('Uploaded $fileName and saved metadata.');
               } catch (e) {
                 print('Error uploading $fileName: $e');
               }
@@ -531,16 +541,20 @@ Future<void> _playSong(int index, {bool resume = false}) async {
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text('Signed out successfully.')),
                 );
-                setState(() {}); // Update the UI
+                setState(() {
+                  _songs.clear(); // Clear the song list on logout
+                  _currentSongIndex = -1;
+                  _currentSongTitle = "No song selected";
+                });
               } else {
                 // Navigate to the AuthScreen and wait for the result
                 final result = await Navigator.of(context).push(
                   MaterialPageRoute(builder: (context) => const AuthScreen()),
                 );
 
-                // If the result is true, update the UI
-                if (result == true) {
-                  setState(() {}); // Trigger a rebuild to update the welcome message
+                // If the result contains fetched songs, update the song list
+                if (result is List<PlatformFile> && result.isNotEmpty) {
+                  updateSongs(result);
                 }
               }
             },

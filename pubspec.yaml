@@ -20,6 +20,8 @@ dependencies:
   permission_handler: ^11.0.1 # For storage permissions
   path_provider: ^2.1.1 # To get common file system locations
 
+  http: ^1.4.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter

@@ -107,6 +107,9 @@ void initState() {
         _songs.clear(); // Clear songs when signed out
         _currentSongIndex = -1;
         _currentSongTitle = "No song selected";
+        _isPlaying = false; // Update the playing state
+        _duration = Duration.zero; // Reset the duration
+        _position = Duration.zero; // Reset the position
       });
     }
   });
@@ -481,11 +484,27 @@ Future<void> _playSong(int index, {bool resume = false}) async {
     print("Stopped playback for removed playing song: $removedSongName");
   }
 
-  // 2. Remove the song from the list
+// 2. Remove the song from Firebase Cloud Storage if the user is logged in
+  final user = FirebaseAuth.instance.currentUser;
+  if (user != null) {
+    try {
+      final uid = user.uid;
+      final storageRef = FirebaseStorage.instance.ref().child('songs/$uid/$removedSongName');
+      await storageRef.delete();
+      print("Deleted $removedSongName from Firebase Cloud Storage.");
+    } catch (e) {
+      print("Error deleting $removedSongName from Firebase Cloud Storage: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Failed to delete $removedSongName from the cloud.')),
+      );
+    }
+  }
+
+  // 3. Remove the song from the local list
   _songs.removeAt(indexToRemove);
   print("Song $removedSongName removed. New song count: ${_songs.length}");
 
-  // 3. Adjust _currentSongIndex and player state
+  // 4. Adjust _currentSongIndex and player state
   if (_songs.isEmpty) {
     _currentSongIndex = -1;
     _currentSongTitle = "No song selected";
@@ -538,6 +557,7 @@ Future<void> _playSong(int index, {bool resume = false}) async {
               if (FirebaseAuth.instance.currentUser != null) {
                 // User is signed in, so sign out
                 await FirebaseAuth.instance.signOut();
+                await _audioPlayer.stop();
                 ScaffoldMessenger.of(context).showSnackBar(
                   const SnackBar(content: Text('Signed out successfully.')),
                 );
@@ -607,7 +627,7 @@ Future<void> _playSong(int index, {bool resume = false}) async {
 
             // Artist/Status Text
             Text(
-              _currentSongIndex != -1 ? "Playing from local file" : "Select a song",
+              _currentSongIndex != -1 ? "Playing . . ." : "Select a song",
               style: Theme.of(context).textTheme.titleMedium?.copyWith(color: Colors.white70),
             ),
             const SizedBox(height: 24),

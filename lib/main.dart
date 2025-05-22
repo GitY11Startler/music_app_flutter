@@ -516,6 +516,19 @@ Future<void> _playSong(int index, {bool resume = false}) async {
     _currentSongIndex--;
   }
 
+  // 5. If a valid song is still selected, set it as the source for the audio player
+  if (_currentSongIndex != -1) {
+    try {
+      await _audioPlayer.setSourceBytes(_songs[_currentSongIndex].bytes as Uint8List);
+      print("Audio player source set to '${_songs[_currentSongIndex].name}'");
+    } catch (e) {
+      print("Error setting audio player source: $e");
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Error setting audio source for ${_songs[_currentSongIndex].name}')),
+      );
+    }
+  }
+
   setState(() {}); // Update the UI
 }
 
